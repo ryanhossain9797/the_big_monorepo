@@ -1,0 +1,75 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pingpong-instance-a
+  labels:
+    app: pingpong-instance-a
+    serviceName: PingPong.InstanceA
+    releaseId: dev
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pingpong-instance-a
+  template:
+    metadata:
+      labels:
+        app: pingpong-instance-a
+        serviceName: PingPong.InstanceA
+        releaseId: dev
+    spec:
+      containers:
+      - name: pingpong-instance-a
+        image: pingpong:latest
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 8080
+          protocol: TCP
+        env:
+        - name: HTTP_PORT
+          value: "8080"
+        - name: INSTANCE_ID
+          value: "instance-a"
+        - name: SIBLING_URL
+          value: "http://pingpong-instance-b:8080"
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "50m"
+          limits:
+            memory: "128Mi"
+            cpu: "100m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pingpong-instance-a
+  labels:
+    app: pingpong-instance-a
+spec:
+  selector:
+    app: pingpong-instance-a
+  ports:
+  - protocol: TCP
+    port: 8080
+    targetPort: 8080
+    name: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: pingpong-instance-a-ingress
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  rules:
+  - host: pingpong-a.localhost
+    http:
+      paths:
+      - pathType: Prefix
+        path: /
+        backend:
+          service:
+            name: pingpong-instance-a
+            port:
+              number: 8080

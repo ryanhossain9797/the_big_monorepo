@@ -15,7 +15,7 @@ A lightweight Rust service that implements a ping-pong mechanism between two ins
 - `SIBLING_URL`: URL of the sibling instance to ping (optional)
 - `INSTANCE_ID`: Unique identifier for this instance (default: "default")
 
-## Usage
+## Local Development
 
 ### Building
 
@@ -60,30 +60,6 @@ HTTP_PORT=8081 INSTANCE_ID=instance-b SIBLING_URL=http://localhost:8080 cargo ru
 }
 ```
 
-## Example Output
-
-When running two instances, you'll see output like:
-
-Instance A:
-```
-Starting PingPong instance: instance-a
-HTTP server will run on port: 8080
-Will ping sibling at: http://localhost:8081
-Starting HTTP server on 0.0.0.0:8080
-🏓 Received ping, responding with pong
-✅ Ping sent successfully to http://localhost:8081: pong
-```
-
-Instance B:
-```
-Starting PingPong instance: instance-b
-HTTP server will run on port: 8081
-Will ping sibling at: http://localhost:8080
-Starting HTTP server on 0.0.0.0:8081
-🏓 Received ping, responding with pong
-✅ Ping sent successfully to http://localhost:8080: pong
-```
-
 ## Testing
 
 ### Manual Testing
@@ -97,20 +73,6 @@ curl http://localhost:8080/ping
 # Test health endpoint
 curl http://localhost:8080/health
 ```
-
-### Automated Testing
-
-Use the provided test script to run two instances and see the ping-pong activity:
-
-```bash
-./test_pingpong.sh
-```
-
-This script will:
-1. Start two instances on ports 8080 and 8081
-2. Test the health and ping endpoints
-3. Watch the ping-pong activity for 30 seconds
-4. Clean up the processes
 
 ## Dependencies
 
@@ -148,3 +110,91 @@ docker run -p 8081:8080 -e INSTANCE_ID=instance-b -e SIBLING_URL=http://host.doc
 ```
 
 Note: Use `host.docker.internal` on Docker Desktop or the host IP address on Linux to allow containers to communicate with each other.
+
+## Kubernetes Deployment
+
+This project includes Kubernetes deployment configuration for running in a kind cluster.
+
+### Quick Deploy
+
+```bash
+# Deploy both instances to the kind cluster
+./deploy.sh deploy
+```
+
+### Telepresence Integration
+
+For local development with Telepresence:
+
+```bash
+# Intercept instance-a for local development
+telepresence intercept pingpong-instance-a --port 8080:8080
+
+# Run locally
+cargo run
+```
+
+### Deployment Commands
+
+```bash
+# Check deployment status
+./deploy.sh status
+
+# Test the deployments
+./deploy.sh test
+
+# Cleanup deployments
+./deploy.sh cleanup
+```
+
+### Monitoring with k9s
+
+Use k9s to monitor the deployments and view logs:
+
+```bash
+# Start k9s (if installed)
+k9s
+
+# Navigate to pods view and select a pingpong pod to see logs
+# Press 'l' to view logs, 's' to view shell, etc.
+```
+
+The ping-pong activity will be visible in the pod logs every 10 seconds.
+
+## Example Output
+
+When running two instances, you'll see output like:
+
+Instance A:
+```
+Starting PingPong instance: instance-a
+HTTP server will run on port: 8080
+Will ping sibling at: http://localhost:8081
+Starting HTTP server on 0.0.0.0:8080
+🏓 Received ping, responding with pong
+✅ Ping sent successfully to http://localhost:8081: pong
+```
+
+Instance B:
+```
+Starting PingPong instance: instance-b
+HTTP server will run on port: 8081
+Will ping sibling at: http://localhost:8080
+Starting HTTP server on 0.0.0.0:8081
+🏓 Received ping, responding with pong
+✅ Ping sent successfully to http://localhost:8080: pong
+```
+
+## Project Structure
+
+```
+pingpong/
+├── src/main.rs              # Main application code
+├── Cargo.toml               # Rust dependencies
+├── Dockerfile               # Container image
+├── deploy.sh                # Kubernetes deployment script
+├── k8s/                     # Kubernetes manifests
+│   ├── pingpong-instance-a.yaml
+│   └── pingpong-instance-b.yaml
+└── README.md                # This file
+```

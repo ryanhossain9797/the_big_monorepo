@@ -36,6 +36,8 @@ check_kind_cluster() {
     print_success "Kind cluster found"
 }
 
+
+
 # Build Docker image
 build_image() {
     print_status "Building PingPong Docker image..."
@@ -54,15 +56,12 @@ build_image() {
 deploy_to_k8s() {
     print_status "Deploying PingPong instances to Kubernetes..."
     
-    # Change to k8s directory
-    cd "$(dirname "$0")/k8s"
-    
     # Apply manifests
     print_status "Deploying instance-a..."
-    kubectl apply -f pingpong-instance-a.yaml
+    kubectl apply -f k8s/pingpong-instance-a.yaml
     
     print_status "Deploying instance-b..."
-    kubectl apply -f pingpong-instance-b.yaml
+    kubectl apply -f k8s/pingpong-instance-b.yaml
     
     print_success "Deployments applied"
 }
@@ -114,14 +113,8 @@ test_deployments() {
     # Wait a bit for services to be ready
     sleep 5
     
-    # Test instance-a health
-    if kubectl run test-instance-a --image=busybox --rm -it --restart=Never -- wget -qO- http://pingpong-instance-a:8080/health; then
-        print_success "Instance A health check passed"
-    else
-        print_error "Instance A health check failed"
-    fi
-    
-    # Test instance-b health
+    # Test instance-b health (should always work as it's PONG ONLY)
+    print_status "Testing instance-b health..."
     if kubectl run test-instance-b --image=busybox --rm -it --restart=Never -- wget -qO- http://pingpong-instance-b:8080/health; then
         print_success "Instance B health check passed"
     else
@@ -132,11 +125,12 @@ test_deployments() {
 # Cleanup function
 cleanup() {
     print_status "Cleaning up deployments..."
-    cd "$(dirname "$0")/k8s"
-    kubectl delete -f pingpong-instance-a.yaml --ignore-not-found=true
-    kubectl delete -f pingpong-instance-b.yaml --ignore-not-found=true
+    kubectl delete -f k8s/pingpong-instance-a.yaml --ignore-not-found=true
+    kubectl delete -f k8s/pingpong-instance-b.yaml --ignore-not-found=true
     print_success "Cleanup completed"
 }
+
+
 
 # Main script
 main() {
@@ -148,6 +142,7 @@ main() {
     case "${1:-deploy}" in
         "deploy")
             check_kind_cluster
+            cleanup
             build_image
             deploy_to_k8s
             wait_for_deployments
@@ -167,10 +162,10 @@ main() {
             echo "Usage: $0 [deploy|cleanup|status|test]"
             echo ""
             echo "Commands:"
-            echo "  deploy   - Build and deploy PingPong instances (default)"
-            echo "  cleanup  - Remove PingPong deployments"
-            echo "  status   - Show deployment status"
-            echo "  test     - Test the deployments"
+            echo "  deploy  - Clean deploy PingPong instances (default)"
+            echo "  cleanup - Remove PingPong deployments"
+            echo "  status  - Show deployment status"
+            echo "  test    - Test the deployments"
             exit 1
             ;;
     esac

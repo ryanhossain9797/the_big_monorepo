@@ -57,11 +57,11 @@ deploy_to_k8s() {
     print_status "Deploying PingPong instances to Kubernetes..."
     
     # Apply manifests
-    print_status "Deploying instance-a..."
-    kubectl apply -f k8s/pingpong-instance-a.yaml
+    print_status "Deploying pinger..."
+    kubectl apply -f k8s/pingpong-pinger.yaml
     
-    print_status "Deploying instance-b..."
-    kubectl apply -f k8s/pingpong-instance-b.yaml
+    print_status "Deploying ponger..."
+    kubectl apply -f k8s/pingpong-ponger.yaml
     
     print_success "Deployments applied"
 }
@@ -70,13 +70,13 @@ deploy_to_k8s() {
 wait_for_deployments() {
     print_status "Waiting for deployments to be ready..."
     
-    # Wait for instance-a
-    print_status "Waiting for pingpong-instance-a..."
-    kubectl wait --for=condition=available --timeout=300s deployment/pingpong-instance-a
+    # Wait for pinger
+    print_status "Waiting for pingpong-pinger..."
+    kubectl wait --for=condition=available --timeout=300s deployment/pingpong-pinger
     
-    # Wait for instance-b
-    print_status "Waiting for pingpong-instance-b..."
-    kubectl wait --for=condition=available --timeout=300s deployment/pingpong-instance-b
+    # Wait for ponger
+    print_status "Waiting for pingpong-ponger..."
+    kubectl wait --for=condition=available --timeout=300s deployment/pingpong-ponger
     
     print_success "All deployments are ready"
 }
@@ -87,23 +87,23 @@ show_status() {
     echo ""
     
     # Show pods
-    kubectl get pods -l app=pingpong-instance-a
-    kubectl get pods -l app=pingpong-instance-b
+    kubectl get pods -l app=pingpong-pinger
+    kubectl get pods -l app=pingpong-ponger
     
     echo ""
     print_status "Services:"
-    kubectl get svc -l app=pingpong-instance-a
-    kubectl get svc -l app=pingpong-instance-b
+    kubectl get svc -l app=pingpong-pinger
+    kubectl get svc -l app=pingpong-ponger
     
     echo ""
     print_status "Ingress endpoints:"
-    echo "Instance A: http://pingpong-a.localhost"
-    echo "Instance B: http://pingpong-b.localhost"
+    echo "Pinger: http://pingpong-pinger.localhost"
+    echo "Ponger: http://pingpong-ponger.localhost"
     
     echo ""
     print_status "For Telepresence interception:"
-    echo "Instance A: telepresence intercept pingpong-instance-a --port 8080:8080"
-    echo "Instance B: telepresence intercept pingpong-instance-b --port 8080:8080"
+    echo "Pinger: telepresence intercept pingpong-pinger --port 8080:8080"
+    echo "Ponger: telepresence intercept pingpong-ponger --port 8080:8080"
 }
 
 # Test the deployments
@@ -113,20 +113,20 @@ test_deployments() {
     # Wait a bit for services to be ready
     sleep 5
     
-    # Test instance-b health (should always work as it's PONG ONLY)
-    print_status "Testing instance-b health..."
-    if kubectl run test-instance-b --image=busybox --rm -it --restart=Never -- wget -qO- http://pingpong-instance-b:8080/health; then
-        print_success "Instance B health check passed"
+    # Test ponger health (should always work as it's PONG ONLY)
+    print_status "Testing ponger health..."
+    if kubectl run test-ponger --image=busybox --rm -it --restart=Never -- wget -qO- http://pingpong-ponger:8080/health; then
+        print_success "Ponger health check passed"
     else
-        print_error "Instance B health check failed"
+        print_error "Ponger health check failed"
     fi
 }
 
 # Cleanup function
 cleanup() {
     print_status "Cleaning up deployments..."
-    kubectl delete -f k8s/pingpong-instance-a.yaml --ignore-not-found=true
-    kubectl delete -f k8s/pingpong-instance-b.yaml --ignore-not-found=true
+    kubectl delete -f k8s/pingpong-pinger.yaml --ignore-not-found=true
+    kubectl delete -f k8s/pingpong-ponger.yaml --ignore-not-found=true
     print_success "Cleanup completed"
 }
 

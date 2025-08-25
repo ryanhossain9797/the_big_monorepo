@@ -1,5 +1,5 @@
 # Use the official Rust image as a builder
-FROM rust:1.75-slim as builder
+FROM rust:latest as builder
 
 # Set the working directory
 WORKDIR /app
@@ -9,6 +9,9 @@ COPY Cargo.toml Cargo.lock ./
 
 # Create a dummy main.rs to build dependencies
 RUN mkdir src && echo "fn main() {}" > src/main.rs
+
+# Update lock file to compatible format if needed
+RUN cargo update
 
 # Build dependencies only
 RUN cargo build --release
@@ -45,7 +48,6 @@ USER pingpong
 EXPOSE 8080
 
 # Set environment variables
-ENV HTTP_PORT=8080
 ENV INSTANCE_ID=default
 
 # Run the binary

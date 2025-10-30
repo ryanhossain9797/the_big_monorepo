@@ -55,8 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Generate tokens
     let max_tokens = 1000;
     let mut n_cur = batch.n_tokens();
-
-    println!("Response:");
+    let mut response = String::new();
 
     let start_time = ggml_time_us();
 
@@ -69,10 +68,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             break;
         }
 
-        // Convert token to string and print
+        // Convert token to string and add to response
         let output = model.token_to_str(new_token, Special::Tokenize)?;
-        print!("{}", output);
-        std::io::Write::flush(&mut std::io::stdout())?;
+        response.push_str(&output);
 
         // Prepare next batch
         batch.clear();
@@ -86,7 +84,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let end_time = ggml_time_us();
     let duration_ms = (end_time - start_time) as f64 / 1000.0;
 
-    println!("\n\nGeneration completed in {:.2}ms", duration_ms);
+    println!("Response:\n{}", response);
+    println!("\nGeneration completed in {:.2}ms", duration_ms);
 
     Ok(())
 }

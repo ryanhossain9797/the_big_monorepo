@@ -39,9 +39,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         print!("You: ");
         io::stdout().flush()?;
 
-        let mut prompt = String::new();
-        io::stdin().read_line(&mut prompt)?;
-        let prompt = prompt.trim();
+        let mut user_msg = String::new();
+        io::stdin().read_line(&mut user_msg)?;
+        let prompt = user_msg.trim();
 
         // Check for exit commands
         if prompt.is_empty() {
@@ -52,13 +52,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             break;
         }
 
+        // Clear KV cache to start fresh for each prompt
+        ctx.clear_kv_cache();
+
         // Use Qwen2.5's ChatML format for better instruction following
         let conversation_prompt = format!(
             "<|im_start|>system\nYou are a helpful assistant that provides direct, concise answers to questions.<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n",
             prompt
         );
-
-        drop(prompt);
 
         let tokens = model.str_to_token(&conversation_prompt, AddBos::Always)?;
 

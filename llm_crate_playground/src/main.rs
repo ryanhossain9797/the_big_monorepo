@@ -55,9 +55,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Clear KV cache to start fresh for each prompt
         ctx.clear_kv_cache();
 
-        // Use Qwen2.5's ChatML format for better instruction following
+        // Use Qwen2.5's ChatML format for device control parsing
         let conversation_prompt = format!(
-            "<|im_start|>system\nYou are a helpful assistant that provides direct, concise answers to questions.<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n",
+            "<|im_start|>system\nYou are a device control parser. Parse user commands to control devices and respond with ONLY a JSON object with these exact fields:
+- ResponseMessage: A friendly confirmation or error message (always required)
+- IsSuccess: true if you understood the command and extracted device/property/value, false if command is unclear or invalid (always required)
+- Device: The device name (e.g., \"ac\", \"light\", \"fan\") or null if not found
+- Property: The property being set (e.g., \"temperature\", \"brightness\") or null if not found
+- Value: The value to set (number or string) or null if not found
+
+Examples:
+- \"Set ac to 27\" → {{\"ResponseMessage\":\"Setting AC temperature to 27 degrees\",\"IsSuccess\":true,\"Device\":\"ac\",\"Property\":\"temperature\",\"Value\":27}}
+- \"Turn on the lights\" → {{\"ResponseMessage\":\"Turning on the lights\",\"IsSuccess\":true,\"Device\":\"light\",\"Property\":\"power\",\"Value\":\"on\"}}
+- \"Hello\" → {{\"ResponseMessage\":\"Please provide a device control command\",\"IsSuccess\":false,\"Device\":null,\"Property\":null,\"Value\":null}}
+
+Respond ONLY with valid JSON, no additional text.<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n",
             prompt
         );
 
@@ -74,9 +86,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Process the prompt
         ctx.decode(&mut batch)?;
 
-        // Create sampler chain with lower temperature for more focused responses
-        let mut sampler =
-            LlamaSampler::chain_simple([LlamaSampler::temp(0.3), LlamaSampler::dist(0)]);
+        // Load the device control grammar for structured output
+        let grammar = include_str!("../grammars/device_control.gbnf");
+
+        // Create sampler chain with grammar constraint for structured JSON output
+        let mut sampler = LlamaSampler::chain_simple([
+            LlamaSampler::temp(0.3),              // Lower temperature for consistent parsing
+            LlamaSampler::grammar(&model, grammar, "root")
+                .expect("Failed to load grammar - check GBNF syntax"), // Enforce JSON schema
+            LlamaSampler::dist(0),                 // Random sampling
+        ]);
 
         // Generate tokens
         let max_tokens = 1000;
@@ -97,14 +116,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Convert token to string and add to response
             let output = model.token_to_str(new_token, Special::Tokenize)?;
 
-            // Stop if we hit the ChatML end token
+            response.push_str(&output);
+            print!("{}", output);
+            io::stdout().flush()?;
+
+            // Stop if we hit the ChatML end token or completed a valid JSON object
             if response.contains("<|im_end|>") || output.contains("<|im_end|>") {
                 break;
             }
 
-            response.push_str(&output);
-            print!("{}", output);
-            io::stdout().flush()?;
+            // Grammar ensures valid JSON, so we can stop when we complete the object
+            // Check if we have a complete JSON object (balanced braces)
+            let open_braces = response.matches('{').count();
+            let close_braces = response.matches('}').count();
+            if open_braces > 0 && open_braces == close_braces {
+                break;
+            }
 
             // Prepare next batch
             batch.clear();

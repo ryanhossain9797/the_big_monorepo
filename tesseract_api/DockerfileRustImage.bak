@@ -1,0 +1,26 @@
+# Use the rust:slim-buster base image
+FROM rust:slim-bookworm
+
+# Update the package lists and install the required packages
+RUN apt-get update && apt-get install -y \
+    curl \
+    libleptonica-dev \
+    libtesseract-dev \
+    clang \
+    tesseract-ocr-eng \
+    pkg-config
+
+# (Optional) If you need additional configurations or setup, you can add them here.
+
+# Set the working directory for your Rust project (if needed)
+WORKDIR /tesseract
+
+COPY './src/*' './src/'
+COPY './Cargo.toml' './'
+COPY './Cargo.lock' './'
+
+
+# Expose port 9876
+EXPOSE 9876
+
+CMD ["cargo", "run", "--release"]

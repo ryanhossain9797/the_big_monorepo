@@ -1,0 +1,13 @@
+/target
+/configuration.json
+/data/home_devices.json
+/.env
+/lib
+/action_log.txt
+/credentials/*
+!/credentials/Readme.md
+**/*.rs.bk
+
+/terminal_alpha_beta
+
+/.vscode

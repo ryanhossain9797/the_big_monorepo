@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="RemoteTargetsManager">
+    <targets>
+      <target name="WSL - Arch" type="wsl" uuid="18bdd2b4-7a68-457c-b13e-e53e94488952">
+        <config>
+          <option name="distributionMsId" value="Arch" />
+          <option name="projectRootOnTarget" value="/mnt/c/Users/raiyan.hossain/AppData/Local/JetBrains/Toolbox/apps/CLion/ch-0/222.3244.6/jbr/bin&#10;/terminal_alpha_beta" />
+        </config>
+        <ContributedStateBase type="RsLanguageRuntime">
+          <config>
+            <option name="cargoPath" value="/home/zireael9797/.cargo/bin/cargo" />
+            <option name="cargoVersion" value="1.63.0-nightly (39ad1039d 2022-05-25)" />
+            <option name="rustcPath" value="/home/zireael9797/.cargo/bin/rustc" />
+            <option name="rustcVersion" value="1.63.0-nightly (c35035cef 2022-05-30)" />
+          </config>
+        </ContributedStateBase>
+      </target>
+    </targets>
+  </component>
+</project>

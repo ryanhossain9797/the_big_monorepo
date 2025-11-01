@@ -1,0 +1,32 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="NonemptyString.fs" />
+    <Compile Include="PositiveNumeric.fs" />
+    <Compile Include="OptionExtensions.fs" />
+    <Compile Include="SequenceExtensions.fs" />
+    <Compile Include="GuidExtensions.fs" />
+    <Compile Include="DateTimeExtensions.fs" />
+    <Compile Include="Models.fs" />
+    <Compile Include="InteropBinding.fs" />
+    <Compile Include="Common.fs" />
+    <Compile Include="LegacyBkash.fs" />
+    <Compile Include="BkashDirectDebit.fs" />
+    <Compile Include="PortPos.fs" />
+    <Compile Include="Braintree.fs" />
+    <Compile Include="Nagad.fs" />
+    <Compile Include="Library.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Braintree" Version="5.14.0" />
+    <ProjectReference Include="..\Interop\Interop.csproj" />
+    <PackageReference Include="BouncyCastle.NetCoreSdk" Version="1.9.3.1" />
+  </ItemGroup>
+
+</Project>

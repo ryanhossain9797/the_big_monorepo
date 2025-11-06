@@ -42,7 +42,7 @@ pub struct LLMResponse {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "decision_type", rename_all = "PascalCase")]
 pub enum AppointmentDecision {
-    Contact,
+    Undecided,
     Confirm,
     Cancel,
     Reschedule {
@@ -64,7 +64,7 @@ fn build_decision_schema() -> serde_json::Value {
                 "properties": {
                     "decision_type": {
                         "type": "string",
-                        "enum": ["Contact", "Confirm", "Cancel", "Reschedule"],
+                        "enum": ["Undecided", "Confirm", "Cancel", "Reschedule"],
                         "description": "The decision type"
                     },
                     "approximate_time": {
@@ -120,7 +120,7 @@ Appointment Details:
 Based on the conversation with the patient, decide what action to take:
 
 Decision types:
-- Contact: You need more information from the patient
+- Undecided: You need more information from the patient
   * Use when you can't clearly determine their intent
   * If first contact: Introduce yourself and ask about their appointment
   * If continuing: Reference their previous response and ask follow-up
@@ -137,7 +137,7 @@ IMPORTANT:
 - Always include a "message" field with a friendly, nurse-like message
 - The conversation will continue regardless of your decision
 - Vary your phrasing - don't repeat patterns
-- Do NOT assume intent - use Contact if unsure"#,
+- Do NOT assume intent - use Undecided if unsure"#,
         clinic_name = clinic_name,
         patient_name = appointment.patient_name,
         appointment_date = appointment.appointment_date.format("%Y-%m-%d"),
@@ -232,7 +232,7 @@ pub async fn do_main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Update appointment status based on decision
         match &llm_response.decision {
-            AppointmentDecision::Contact => {
+            AppointmentDecision::Undecided => {
                 // Status remains unchanged
             }
             AppointmentDecision::Confirm => {

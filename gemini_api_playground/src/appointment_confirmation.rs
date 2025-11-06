@@ -1,75 +1,109 @@
 use crate::prepare_gemini_client;
-use gemini_rust::Gemini;
+use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+use gemini_rust::{Gemini, Message};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::json;
 use std::io::{self, Write};
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct AppointmentDetails {
+pub struct Appointment {
     patient_name: String,
-    appointment_date: String,
-    appointment_time: String,
+    appointment_date: NaiveDate,
+    appointment_time: NaiveTime,
     doctor_name: String,
     appointment_type: String,
+    status: AppointmentStatus,
+    #[serde(skip)]
+    conversation_history: Vec<Message>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct PatientCommunication {
-    message_type: String, // "email", "sms", "call", "contact_attempt"
-    content: String,
-    timestamp: String,
+#[serde(tag = "type", rename_all = "PascalCase")]
+pub enum AppointmentStatus {
+    Unconfirmed {
+        datetime: NaiveDateTime,
+    },
+    Confirmed {
+        datetime: NaiveDateTime,
+    },
+    RescheduleRequired {
+        last_known_time: NaiveDateTime,
+        approximate_time: String,
+    },
+    Cancelled,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct LLMResponse {
+    message: String,
+    decision: AppointmentDecision,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "decision_type", rename_all = "PascalCase")]
 pub enum AppointmentDecision {
-    WantsToReschedule {
+    Contact,
+    Confirm,
+    Cancel,
+    Reschedule {
         #[serde(default)]
         approximate_time: String,
     },
-    Cancel,
-    Confirmed,
-    Contact {
-        #[serde(default)]
-        message: String,
-    },
 }
 
-fn build_decision_schema() -> Value {
+fn build_decision_schema() -> serde_json::Value {
     json!({
         "type": "object",
         "properties": {
-            "decision_type": {
-                "type": "string",
-                "enum": ["WantsToReschedule", "Cancel", "Confirmed", "Contact"],
-                "description": "The type of decision"
-            },
-            "approximate_time": {
-                "type": "string",
-                "description": "REQUIRED for WantsToReschedule: approximate or best-guess time the patient wants (e.g., 'next week', 'in 2 days', '1 hour later')"
-            },
             "message": {
                 "type": "string",
-                "description": "REQUIRED for Contact: the message to send to the patient"
+                "description": "REQUIRED: A friendly message to send to the patient"
+            },
+            "decision": {
+                "type": "object",
+                "properties": {
+                    "decision_type": {
+                        "type": "string",
+                        "enum": ["Contact", "Confirm", "Cancel", "Reschedule"],
+                        "description": "The decision type"
+                    },
+                    "approximate_time": {
+                        "type": "string",
+                        "description": "REQUIRED for Reschedule: approximate time the patient wants (e.g., 'next week', 'in 2 days')"
+                    }
+                },
+                "required": ["decision_type"]
             }
         },
-        "required": ["decision_type"]
+        "required": ["message", "decision"]
     })
 }
 
-fn build_prompt(
-    clinic_name: &str,
-    appointment: &AppointmentDetails,
-    previous_communications: &[PatientCommunication],
-) -> String {
-    let comm_context = if previous_communications.is_empty() {
-        "No previous communications.".to_string()
-    } else {
-        previous_communications
-            .iter()
-            .map(|c| format!("[{}] {}: {}", c.timestamp, c.message_type, c.content))
-            .collect::<Vec<_>>()
-            .join("\n")
+fn build_initial_prompt(clinic_name: &str, appointment: &Appointment) -> String {
+    let status_description = match &appointment.status {
+        AppointmentStatus::Unconfirmed { datetime } => {
+            format!(
+                "Unconfirmed (scheduled for {})",
+                datetime.format("%Y-%m-%d %H:%M")
+            )
+        }
+        AppointmentStatus::Confirmed { datetime } => {
+            format!(
+                "Confirmed (scheduled for {})",
+                datetime.format("%Y-%m-%d %H:%M")
+            )
+        }
+        AppointmentStatus::RescheduleRequired {
+            last_known_time,
+            approximate_time,
+        } => {
+            format!(
+                "Reschedule requested (was: {}, wants: {})",
+                last_known_time.format("%Y-%m-%d %H:%M"),
+                approximate_time
+            )
+        }
+        AppointmentStatus::Cancelled => "Cancelled".to_string(),
     };
 
     format!(
@@ -81,79 +115,73 @@ Appointment Details:
 - Time: {appointment_time}
 - Doctor: {doctor_name}
 - Type: {appointment_type}
+- Current Status: {status}
 
-Previous Communications:
-{comm_context}
-
-IMPORTANT CONTEXT:
-- Communications marked as "contact_attempt" are part of an ongoing SMS conversation thread
-- Each contact_attempt shows: your previous message and the patient's response
-- If there are contact_attempts, you are CONTINUING an existing conversation - do NOT repeat yourself
-- Read the full conversation history to understand what has already been discussed
-- Avoid repeating questions or information already covered in previous contact_attempts
-- Build on the conversation naturally
-
-Based on the patient's communications (if any), determine the appropriate action:
+Based on the conversation with the patient, decide what action to take:
 
 Decision types:
-- Confirmed: Patient clearly confirmed the appointment
-- WantsToReschedule: Patient clearly wants to reschedule (will be handled by staff)
-  * REQUIRED: Include "approximate_time" with your best guess of when they want to reschedule
-  * The time does NOT need to be precise or accurate - approximate is fine
-  * Examples: "next week", "in a few days", "1-2 hours later", "Friday afternoon"
-  * If patient says "delay by 1 or 2 hours", putting "1 hour later" or "1.5 hours later" is perfectly acceptable
+- Contact: You need more information from the patient
+  * Use when you can't clearly determine their intent
+  * If first contact: Introduce yourself and ask about their appointment
+  * If continuing: Reference their previous response and ask follow-up
+- Confirm: Patient clearly confirmed the appointment
+  * Acknowledge their confirmation warmly
 - Cancel: Patient clearly wants to cancel
-- Contact: Use this if you cannot clearly determine what the patient wants
-  * REQUIRED: Include "message" with a warm, conversational text message
-  * If this is the FIRST contact (no contact_attempts in history): Introduce yourself and ask about their appointment preference
-  * If CONTINUING a conversation (there are contact_attempts): Reference their previous response and ask a follow-up question. Do NOT repeat the same greeting or question patterns
-  * Briefly explain WHY you need more info (e.g., "I wasn't sure what you meant by...", "Just to clarify...")
+  * Confirm cancellation with empathy
+- Reschedule: Patient wants to reschedule
+  * REQUIRED: Include "approximate_time" field with your best guess
+  * Examples: "next week", "in 2 days", "1.5 hours later"
+  * Acknowledge and let them know someone will follow up
 
 IMPORTANT:
-- Do not assume Confirmed, Cancelled or WantsToReschedule by default. If unsure, choose Contact
-- For Contact messages, ALWAYS explain why clarification is needed
-- Write Contact messages in a friendly, natural nurse-like tone
-- When continuing a conversation (contact_attempts exist), be contextually aware - don't repeat yourself
-- Vary your language - if you already asked "what would you like to do?", try "could you let me know..." or similar
-- For WantsToReschedule, you MUST include approximate_time (doesn't need to be exact!)
-- For Contact, you MUST include message"#,
+- Always include a "message" field with a friendly, nurse-like message
+- The conversation will continue regardless of your decision
+- Vary your phrasing - don't repeat patterns
+- Do NOT assume intent - use Contact if unsure"#,
         clinic_name = clinic_name,
         patient_name = appointment.patient_name,
-        appointment_date = appointment.appointment_date,
-        appointment_time = appointment.appointment_time,
+        appointment_date = appointment.appointment_date.format("%Y-%m-%d"),
+        appointment_time = appointment.appointment_time.format("%H:%M"),
         doctor_name = appointment.doctor_name,
         appointment_type = appointment.appointment_type,
-        comm_context = comm_context
+        status = status_description,
     )
 }
 
 async fn generate_appointment_confirmation(
     client: &Gemini,
     clinic_name: &str,
-    appointment: &AppointmentDetails,
-    previous_communications: &[PatientCommunication],
-) -> Result<AppointmentDecision, Box<dyn std::error::Error>> {
+    appointment: &Appointment,
+) -> Result<LLMResponse, Box<dyn std::error::Error>> {
     let schema = build_decision_schema();
-    let prompt = build_prompt(clinic_name, appointment, previous_communications);
+    let initial_prompt = build_initial_prompt(clinic_name, appointment);
 
-    let response = client
+    let mut request = client
         .generate_content()
         .with_system_prompt(
-            r#"You are a friendly and warm nurse at a medical clinic helping with appointment scheduling.
+            r#"You are a friendly and warm automated agent at a medical clinic helping with appointment scheduling.
 
 When writing messages to patients:
 - Write in a conversational, natural tone like a caring nurse would speak
 - Use casual, friendly language (e.g., "Hi!", "Thanks!", "Hope you're doing well!")
+- When introducing yourself for the first time, say "I'm an automated agent from [clinic name]"
+- Do NOT make up names like "[Your Name]" - you are an automated system
 - If you need clarification, politely explain why you're reaching out (e.g., "I wasn't quite sure what you meant" or "Just wanted to check with you")
 - Keep messages brief but warm
 - Avoid overly formal or robotic language
 - Use the patient's first name when appropriate
-- IMPORTANT: If you're continuing a conversation (previous contact_attempts exist), acknowledge their response and build on it naturally
 - Vary your phrasing - don't use the same patterns repeatedly in a conversation thread
 
 Always respond with valid JSON matching the required schema."#
         )
-        .with_user_message(&prompt)
+        .with_user_message(&initial_prompt);
+
+    // Add conversation history
+    for msg in &appointment.conversation_history {
+        request = request.with_message(msg.clone());
+    }
+
+    let response = request
         .with_response_mime_type("application/json")
         .with_response_schema(schema)
         .execute()
@@ -162,9 +190,9 @@ Always respond with valid JSON matching the required schema."#
     let json_text = response.text();
     println!("Raw JSON response:\n{}\n", json_text);
 
-    let decision: AppointmentDecision = serde_json::from_str(&json_text)?;
+    let llm_response: LLMResponse = serde_json::from_str(&json_text)?;
 
-    Ok(decision)
+    Ok(llm_response)
 }
 
 fn get_patient_response() -> Result<String, Box<dyn std::error::Error>> {
@@ -176,67 +204,81 @@ fn get_patient_response() -> Result<String, Box<dyn std::error::Error>> {
     Ok(input.trim().to_string())
 }
 
-fn get_timestamp() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    format!("2025-11-06 {:02}:{:02}", (now / 60) % 24, now % 60)
-}
-
 pub async fn do_main() -> Result<(), Box<dyn std::error::Error>> {
     let client = prepare_gemini_client()?;
 
-    let appointment = AppointmentDetails {
+    let appointment_date = NaiveDate::from_ymd_opt(2025, 11, 15).unwrap();
+    let appointment_time = NaiveTime::from_hms_opt(14, 30, 0).unwrap();
+    let initial_datetime = NaiveDateTime::new(appointment_date, appointment_time);
+
+    let mut appointment = Appointment {
         patient_name: "Raiyan Hossain".to_string(),
-        appointment_date: "2025-11-15".to_string(),
-        appointment_time: "14:30".to_string(),
+        appointment_date,
+        appointment_time,
         doctor_name: "Dr. Sara Karim".to_string(),
         appointment_type: "Annual Checkup".to_string(),
+        status: AppointmentStatus::Unconfirmed {
+            datetime: initial_datetime,
+        },
+        conversation_history: vec![],
     };
 
-    let mut communications: Vec<PatientCommunication> = vec![];
-
     loop {
-        let decision = generate_appointment_confirmation(
-            &client,
-            "Labaid Hospital",
-            &appointment,
-            &communications,
-        )
-        .await?;
+        let llm_response =
+            generate_appointment_confirmation(&client, "Labaid Hospital", &appointment).await?;
 
-        match decision {
-            AppointmentDecision::Contact { ref message } => {
-                println!("\n>>> Clinic: {}\n", message);
+        // Print the LLM's message
+        println!("\n>>> Clinic: {}\n", llm_response.message);
 
-                let response = get_patient_response()?;
-
-                // Record both message and response as a single contact attempt
-                communications.push(PatientCommunication {
-                    message_type: "contact_attempt".to_string(),
-                    content: format!(
-                        "message_to_patient: {message}\npatient_response: {response}"
-                    ),
-                    timestamp: get_timestamp(),
-                });
+        // Update appointment status based on decision
+        match &llm_response.decision {
+            AppointmentDecision::Contact => {
+                // Status remains unchanged
             }
-            AppointmentDecision::Confirmed => {
-                println!("\nAppointment CONFIRMED");
-                break;
+            AppointmentDecision::Confirm => {
+                let datetime =
+                    NaiveDateTime::new(appointment.appointment_date, appointment.appointment_time);
+                appointment.status = AppointmentStatus::Confirmed { datetime };
+                println!("[Status updated: Confirmed]");
             }
             AppointmentDecision::Cancel => {
-                println!("\nAppointment CANCELLED");
-                break;
+                appointment.status = AppointmentStatus::Cancelled;
+                println!("[Status updated: Cancelled]");
             }
-            AppointmentDecision::WantsToReschedule { ref approximate_time } => {
-                println!("\nPatient WANTS TO RESCHEDULE (approx: {})", approximate_time);
-                println!("→ A staff member will follow up to finalize the new appointment time");
-                break;
+            AppointmentDecision::Reschedule { approximate_time } => {
+                let last_known_time =
+                    NaiveDateTime::new(appointment.appointment_date, appointment.appointment_time);
+                appointment.status = AppointmentStatus::RescheduleRequired {
+                    last_known_time,
+                    approximate_time: approximate_time.clone(),
+                };
+                println!(
+                    "[Status updated: Reschedule Required - {}]",
+                    approximate_time
+                );
             }
         }
+
+        // Add the model's message to conversation history
+        appointment
+            .conversation_history
+            .push(Message::model(llm_response.message.clone()));
+
+        // Get patient response
+        let response = get_patient_response()?;
+
+        // Check for quit command
+        if response.trim().eq_ignore_ascii_case("quit") {
+            println!("\nEnding conversation.");
+            break;
+        }
+
+        // Add user's response to conversation history
+        appointment
+            .conversation_history
+            .push(Message::user(response));
     }
 
+    println!("\nFinal appointment status: {:?}", appointment.status);
     Ok(())
 }

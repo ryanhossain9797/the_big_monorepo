@@ -1,6 +1,7 @@
 use crate::prepare_gemini_client;
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
-use gemini_rust::{Gemini, Message};
+use gemini_rust::{Content, FunctionCallingMode, FunctionDeclaration, Gemini, Message, Role, Tool};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::io::{self, Write};
@@ -8,9 +9,10 @@ use std::io::{self, Write};
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Appointment {
     patient_name: String,
+    doctor_id: String,
+    doctor_name: String,
     appointment_date: NaiveDate,
     appointment_time: NaiveTime,
-    doctor_name: String,
     appointment_type: String,
     status: AppointmentStatus,
     #[serde(skip)]
@@ -26,7 +28,7 @@ pub enum AppointmentStatus {
     Confirmed {
         datetime: NaiveDateTime,
     },
-    RescheduleRequired {
+    ManualIntervention {
         last_known_time: NaiveDateTime,
         approximate_time: String,
     },
@@ -43,12 +45,60 @@ pub struct LLMResponse {
 #[serde(tag = "decision_type", rename_all = "PascalCase")]
 pub enum AppointmentDecision {
     Undecided,
-    Confirm,
+    Confirm {
+        #[serde(default)]
+        new_datetime: Option<String>,
+    },
     Cancel,
-    Reschedule {
+    ManualIntervention {
         #[serde(default)]
         approximate_time: String,
     },
+}
+
+// Tool function parameter types
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+struct GetAvailableSlotsParams {
+    doctor_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+struct AvailableSlotsResponse {
+    available_slots: Vec<String>,
+}
+
+fn build_get_available_slots_tool() -> Tool {
+    let function = FunctionDeclaration::new(
+        "get_available_appointment_slots",
+        "Get all available appointment slots for a specific doctor. Use this when a patient wants to reschedule.",
+        None,
+    )
+    .with_parameters::<GetAvailableSlotsParams>()
+    .with_response::<AvailableSlotsResponse>();
+
+    Tool::new(function)
+}
+
+// Simulated function to get available slots
+fn get_available_appointment_slots(_doctor_id: &str) -> AvailableSlotsResponse {
+    // For simulation, return some available slots over the next few days
+    // In a real system, this would query based on doctor_id
+    let base_date = NaiveDate::from_ymd_opt(2025, 11, 16).unwrap();
+
+    let mut slots = vec![];
+    for day_offset in 0..3 {
+        let date = base_date + chrono::Duration::days(day_offset);
+        for hour in [9, 10, 11, 14, 15, 16] {
+            for minute in [0, 30] {
+                let datetime = date.and_hms_opt(hour, minute, 0).unwrap();
+                slots.push(datetime.format("%Y-%m-%d %H:%M").to_string());
+            }
+        }
+    }
+
+    AvailableSlotsResponse {
+        available_slots: slots,
+    }
 }
 
 fn build_decision_schema() -> serde_json::Value {
@@ -64,12 +114,16 @@ fn build_decision_schema() -> serde_json::Value {
                 "properties": {
                     "decision_type": {
                         "type": "string",
-                        "enum": ["Undecided", "Confirm", "Cancel", "Reschedule"],
+                        "enum": ["Undecided", "Confirm", "Cancel", "ManualIntervention"],
                         "description": "The decision type"
+                    },
+                    "new_datetime": {
+                        "type": "string",
+                        "description": "Optional for Confirm: If patient rescheduled to a new time that you verified is available, include it here in format 'YYYY-MM-DD HH:MM'"
                     },
                     "approximate_time": {
                         "type": "string",
-                        "description": "REQUIRED for Reschedule: approximate time the patient wants (e.g., 'next week', 'in 2 days')"
+                        "description": "REQUIRED for ManualIntervention: approximate time the patient wants (e.g., 'next week', 'in 2 days') or reason for manual intervention (e.g., 'patient requested to speak with staff')"
                     }
                 },
                 "required": ["decision_type"]
@@ -93,12 +147,12 @@ fn build_initial_prompt(clinic_name: &str, appointment: &Appointment) -> String 
                 datetime.format("%Y-%m-%d %H:%M")
             )
         }
-        AppointmentStatus::RescheduleRequired {
+        AppointmentStatus::ManualIntervention {
             last_known_time,
             approximate_time,
         } => {
             format!(
-                "Reschedule requested (was: {}, wants: {})",
+                "Manual intervention required (was: {}, reason: {})",
                 last_known_time.format("%Y-%m-%d %H:%M"),
                 approximate_time
             )
@@ -111,27 +165,40 @@ fn build_initial_prompt(clinic_name: &str, appointment: &Appointment) -> String 
 
 Appointment Details:
 - Patient: {patient_name}
+- Doctor: {doctor_name} (ID: {doctor_id})
 - Date: {appointment_date}
 - Time: {appointment_time}
-- Doctor: {doctor_name}
 - Type: {appointment_type}
 - Current Status: {status}
 
 Based on the conversation with the patient, decide what action to take:
 
 Decision types:
-- Undecided: You need more information from the patient
+- Undecided: You need more information from the patient AND an automated LLM agent will contact them again
   * Use when you can't clearly determine their intent
   * If first contact: Introduce yourself and ask about their appointment
   * If continuing: Reference their previous response and ask follow-up
+  * IMPORTANT: Only use this if you (the automated agent) can handle the next interaction
+  * DO NOT use if patient requested to speak with a person or human staff
 - Confirm: Patient clearly confirmed the appointment
   * Acknowledge their confirmation warmly
+  * If patient selected a specific new time from the available slots, include it in "new_datetime" field
 - Cancel: Patient clearly wants to cancel
   * Confirm cancellation with empathy
-- Reschedule: Patient wants to reschedule
-  * REQUIRED: Include "approximate_time" field with your best guess
-  * Examples: "next week", "in 2 days", "1.5 hours later"
-  * Acknowledge and let them know someone will follow up
+- ManualIntervention: Patient needs human staff assistance (NOT automated agent)
+  * Use when patient explicitly asks to speak with a person, nurse, or staff member
+  * Use when patient wants to reschedule but couldn't select a specific time from available slots
+  * REQUIRED: Include "approximate_time" field with reason or patient's preference
+  * Examples: "patient requested to speak with staff", "next week", "in 2 days"
+  * Acknowledge and let them know human staff will follow up
+
+TOOL USAGE:
+- You have access to get_available_appointment_slots(doctor_id)
+- Use this when patient wants to reschedule or asks about available times
+- The tool returns a list of all available appointment slots
+- Present the options to the patient in a natural, conversational way
+- If patient picks one of the available slots, use Confirm decision with new_datetime
+- If none work or patient is still uncertain, use Undecided or ManualIntervention as appropriate
 
 IMPORTANT:
 - Always include a "message" field with a friendly, nurse-like message
@@ -140,9 +207,10 @@ IMPORTANT:
 - Do NOT assume intent - use Undecided if unsure"#,
         clinic_name = clinic_name,
         patient_name = appointment.patient_name,
+        doctor_id = appointment.doctor_id,
+        doctor_name = appointment.doctor_name,
         appointment_date = appointment.appointment_date.format("%Y-%m-%d"),
         appointment_time = appointment.appointment_time.format("%H:%M"),
-        doctor_name = appointment.doctor_name,
         appointment_type = appointment.appointment_type,
         status = status_description,
     )
@@ -155,11 +223,9 @@ async fn generate_appointment_confirmation(
 ) -> Result<LLMResponse, Box<dyn std::error::Error>> {
     let schema = build_decision_schema();
     let initial_prompt = build_initial_prompt(clinic_name, appointment);
+    let tool = build_get_available_slots_tool();
 
-    let mut request = client
-        .generate_content()
-        .with_system_prompt(
-            r#"You are a friendly and warm automated agent at a medical clinic helping with appointment scheduling.
+    let system_prompt = r#"You are a friendly and warm automated agent at a medical clinic helping with appointment scheduling.
 
 When writing messages to patients:
 - Write in a conversational, natural tone like a caring nurse would speak
@@ -170,29 +236,137 @@ When writing messages to patients:
 - Keep messages brief but warm
 - Avoid overly formal or robotic language
 - Use the patient's first name when appropriate
-- Vary your phrasing - don't use the same patterns repeatedly in a conversation thread
+- Vary your phrasing - don't use the same patterns repeatedly in a conversation thread"#;
 
-Always respond with valid JSON matching the required schema."#
-        )
-        .with_user_message(&initial_prompt);
+    // Phase 1: Initial request with tool to allow function calls
+    let mut request = client
+        .generate_content()
+        .with_system_prompt(system_prompt)
+        .with_user_message(&initial_prompt)
+        .with_tool(tool)
+        .with_function_calling_mode(FunctionCallingMode::Auto);
 
     // Add conversation history
     for msg in &appointment.conversation_history {
         request = request.with_message(msg.clone());
     }
 
-    let response = request
-        .with_response_mime_type("application/json")
-        .with_response_schema(schema)
-        .execute()
-        .await?;
+    let response = request.execute().await?;
 
-    let json_text = response.text();
-    println!("Raw JSON response:\n{}\n", json_text);
+    // Check if there are function calls
+    let function_calls = response.function_calls();
 
-    let llm_response: LLMResponse = serde_json::from_str(&json_text)?;
+    if !function_calls.is_empty() {
+        // Phase 2: Handle function calls and get final response
+        let mut conversation = client.generate_content();
 
-    Ok(llm_response)
+        // Reconstruct conversation: system + user + history
+        // Use a modified system prompt that explicitly tells the model not to include JSON
+        let phase2_system_prompt = format!(
+            "{}\n\nIMPORTANT: Only provide the conversational message to the patient. Do NOT include any JSON, decision types, or structured data in your response. The decision will be extracted separately.",
+            system_prompt
+        );
+        conversation = conversation
+            .with_system_prompt(&phase2_system_prompt)
+            .with_user_message(&initial_prompt);
+
+        for msg in &appointment.conversation_history {
+            conversation = conversation.with_message(msg.clone());
+        }
+
+        // Add function calls and responses
+        for function_call in function_calls {
+            match function_call.name.as_str() {
+                "get_available_appointment_slots" => {
+                    let params: GetAvailableSlotsParams =
+                        serde_json::from_value(function_call.args.clone())?;
+                    let result = get_available_appointment_slots(&params.doctor_id);
+
+                    // Add model message with function call
+                    let model_content = Content::function_call(function_call.clone()).with_role(Role::Model);
+                    conversation = conversation.with_message(Message {
+                        content: model_content,
+                        role: Role::Model,
+                    });
+
+                    // Add function response
+                    conversation = conversation.with_function_response(
+                        "get_available_appointment_slots",
+                        result,
+                    )?;
+                }
+                _ => {
+                    return Err(format!("Unknown function: {}", function_call.name).into());
+                }
+            }
+        }
+
+        // Execute to get the model's response after tool use
+        let text_response = conversation.execute().await?;
+        let response_text = text_response.text();
+
+        // Phase 3: Get structured decision (using the text we already have as the message)
+        let decision_prompt = format!(
+            r#"Based on your previous response: "{}"
+
+Now provide ONLY the decision type as structured JSON.
+Use "Undecided" if you're still gathering information and the automated agent will contact them again.
+Use "Confirm" with "new_datetime" if patient chose a specific available slot.
+Use "ManualIntervention" with "approximate_time" if patient requested human staff or wants to reschedule but gave vague timing.
+Use "Cancel" if patient wants to cancel."#,
+            response_text
+        );
+
+        let mut final_request = client
+            .generate_content()
+            .with_system_prompt("You are analyzing a conversation to extract a structured decision. Always respond with valid JSON matching the required schema.")
+            .with_user_message(&initial_prompt);
+
+        // Add conversation history
+        for msg in &appointment.conversation_history {
+            final_request = final_request.with_message(msg.clone());
+        }
+
+        // Add the model's text response
+        final_request = final_request.with_message(Message::model(&response_text));
+
+        // Add instruction to extract decision
+        final_request = final_request.with_user_message(&decision_prompt);
+
+        let final_response = final_request
+            .with_response_mime_type("application/json")
+            .with_response_schema(schema)
+            .execute()
+            .await?;
+
+        let json_text = final_response.text();
+
+        // Parse and use the response_text as the message
+        let mut llm_response: LLMResponse = serde_json::from_str(&json_text)?;
+        llm_response.message = response_text; // Use the conversational text from Phase 2
+        Ok(llm_response)
+    } else {
+        // No function calls, go straight to structured output
+        let mut final_request = client
+            .generate_content()
+            .with_system_prompt(&format!("{}\n\nAlways respond with valid JSON matching the required schema.", system_prompt))
+            .with_user_message(&initial_prompt);
+
+        for msg in &appointment.conversation_history {
+            final_request = final_request.with_message(msg.clone());
+        }
+
+        let final_response = final_request
+            .with_response_mime_type("application/json")
+            .with_response_schema(schema)
+            .execute()
+            .await?;
+
+        let json_text = final_response.text();
+
+        let llm_response: LLMResponse = serde_json::from_str(&json_text)?;
+        Ok(llm_response)
+    }
 }
 
 fn get_patient_response() -> Result<String, Box<dyn std::error::Error>> {
@@ -213,9 +387,10 @@ pub async fn do_main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut appointment = Appointment {
         patient_name: "Raiyan Hossain".to_string(),
+        doctor_id: "DR001".to_string(),
+        doctor_name: "Dr. Sara Karim".to_string(),
         appointment_date,
         appointment_time,
-        doctor_name: "Dr. Sara Karim".to_string(),
         appointment_type: "Annual Checkup".to_string(),
         status: AppointmentStatus::Unconfirmed {
             datetime: initial_datetime,
@@ -235,25 +410,50 @@ pub async fn do_main() -> Result<(), Box<dyn std::error::Error>> {
             AppointmentDecision::Undecided => {
                 // Status remains unchanged
             }
-            AppointmentDecision::Confirm => {
-                let datetime =
-                    NaiveDateTime::new(appointment.appointment_date, appointment.appointment_time);
-                appointment.status = AppointmentStatus::Confirmed { datetime };
-                println!("[Status updated: Confirmed]");
+            AppointmentDecision::Confirm { new_datetime } => {
+                // If new_datetime is provided, update the appointment date/time
+                if let Some(new_dt_str) = new_datetime {
+                    if let Ok(new_datetime) =
+                        NaiveDateTime::parse_from_str(new_dt_str, "%Y-%m-%d %H:%M")
+                    {
+                        appointment.appointment_date = new_datetime.date();
+                        appointment.appointment_time = new_datetime.time();
+                        appointment.status = AppointmentStatus::Confirmed {
+                            datetime: new_datetime,
+                        };
+                        println!("[Status updated: Confirmed with new time {}]", new_dt_str);
+                    } else {
+                        // Fall back to current appointment time if parsing fails
+                        let datetime = NaiveDateTime::new(
+                            appointment.appointment_date,
+                            appointment.appointment_time,
+                        );
+                        appointment.status = AppointmentStatus::Confirmed { datetime };
+                        println!("[Status updated: Confirmed (original time)]");
+                    }
+                } else {
+                    // No new time, just confirm existing appointment
+                    let datetime = NaiveDateTime::new(
+                        appointment.appointment_date,
+                        appointment.appointment_time,
+                    );
+                    appointment.status = AppointmentStatus::Confirmed { datetime };
+                    println!("[Status updated: Confirmed]");
+                }
             }
             AppointmentDecision::Cancel => {
                 appointment.status = AppointmentStatus::Cancelled;
                 println!("[Status updated: Cancelled]");
             }
-            AppointmentDecision::Reschedule { approximate_time } => {
+            AppointmentDecision::ManualIntervention { approximate_time } => {
                 let last_known_time =
                     NaiveDateTime::new(appointment.appointment_date, appointment.appointment_time);
-                appointment.status = AppointmentStatus::RescheduleRequired {
+                appointment.status = AppointmentStatus::ManualIntervention {
                     last_known_time,
                     approximate_time: approximate_time.clone(),
                 };
                 println!(
-                    "[Status updated: Reschedule Required - {}]",
+                    "[Status updated: Manual Intervention Required - {}]",
                     approximate_time
                 );
             }

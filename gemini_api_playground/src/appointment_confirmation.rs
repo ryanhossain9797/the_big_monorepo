@@ -1,181 +1,101 @@
-use crate::prepare_gemini_client;
+use crate::{
+    appointment_confirmation::utils::{
+        build_decision_schema, build_initial_prompt, create_dummy_appointment,
+        handle_confirm_decision,
+    },
+    prepare_gemini_client,
+};
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
-use gemini_rust::{Content, FunctionCallingMode, FunctionDeclaration, Gemini, Message, Role, Tool};
-use schemars::JsonSchema;
+use gemini_rust::{Content, FunctionCallingMode, Gemini, Message, Role};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
-use std::io::{self, Write};
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Appointment {
-    patient_name: String,
-    doctor_id: String,
-    doctor_name: String,
-    appointment_date: NaiveDate,
-    appointment_time: NaiveTime,
-    appointment_type: String,
-    status: AppointmentStatus,
-    #[serde(skip)]
-    conversation_history: Vec<Message>,
-}
+mod utils {
+    use std::io::{self, Write};
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "PascalCase")]
-pub enum AppointmentStatus {
-    Unconfirmed {
-        datetime: NaiveDateTime,
-    },
-    Confirmed {
-        datetime: NaiveDateTime,
-    },
-    ManualIntervention {
-        last_known_time: NaiveDateTime,
-        approximate_time: String,
-    },
-    Cancelled,
-}
+    use crate::appointment_confirmation::{Appointment, AppointmentStatus};
+    use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+    use serde_json::json;
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "decision_type", rename_all = "PascalCase")]
-pub enum AppointmentDecision {
-    Undecided,
-    Confirm {
-        #[serde(default)]
-        new_datetime: Option<String>,
-    },
-    Cancel,
-    ManualIntervention {
-        #[serde(default)]
-        approximate_time: String,
-    },
-}
+    pub fn create_dummy_appointment() -> Appointment {
+        let appointment_date = NaiveDate::from_ymd_opt(2025, 11, 15).unwrap();
+        let appointment_time = NaiveTime::from_hms_opt(14, 30, 0).unwrap();
+        let initial_datetime = NaiveDateTime::new(appointment_date, appointment_time);
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct LLMResponse {
-    message: String,
-    decision: AppointmentDecision,
-}
-
-// BEGIN Tool call stuff
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-struct GetAvailableSlotsParams {
-    doctor_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-struct AvailableSlotsResponse {
-    available_slots: Vec<String>,
-}
-
-fn build_get_available_slots_tool() -> Tool {
-    let function = FunctionDeclaration::new(
-        "get_available_appointment_slots",
-        "Get all available appointment slots for a specific doctor. Use this when a patient wants to reschedule.",
-        None,
-    )
-    .with_parameters::<GetAvailableSlotsParams>()
-    .with_response::<AvailableSlotsResponse>();
-
-    Tool::new(function)
-}
-
-// Simulated function to get available slots
-fn get_available_appointment_slots(_doctor_id: &str) -> AvailableSlotsResponse {
-    // For simulation, return some available slots over the next few days
-    // In a real system, this would query based on doctor_id
-    let base_date = NaiveDate::from_ymd_opt(2025, 11, 16).unwrap();
-
-    let mut slots = vec![];
-    for day_offset in 0..3 {
-        let date = base_date + chrono::Duration::days(day_offset);
-        for hour in [9, 10, 11, 14, 15, 16] {
-            for minute in [0, 30] {
-                let datetime = date.and_hms_opt(hour, minute, 0).unwrap();
-                slots.push(datetime.format("%Y-%m-%d %H:%M").to_string());
-            }
-        }
-    }
-
-    AvailableSlotsResponse {
-        available_slots: slots,
-    }
-}
-// END Tool call stuff
-
-const SYSTEM_PROMPT: &str = r#"You are a friendly and warm automated agent at a medical clinic helping with appointment scheduling.
-
-When writing messages to patients:
-- Write in a conversational, natural tone like a caring nurse would speak
-- Use casual, friendly language (e.g., "Hi!", "Thanks!", "Hope you're doing well!")
-- When introducing yourself for the first time, say "I'm an automated agent from [clinic name]"
-- Do NOT make up names like "[Your Name]" - you are an automated system
-- If you need clarification, politely explain why you're reaching out (e.g., "I wasn't quite sure what you meant" or "Just wanted to check with you")
-- Keep messages brief but warm
-- Avoid overly formal or robotic language
-- Use the patient's first name when appropriate
-- Vary your phrasing - don't use the same patterns repeatedly in a conversation thread"#;
-
-fn build_decision_schema() -> serde_json::Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "message": {
-                "type": "string",
-                "description": "REQUIRED: A friendly message to send to the patient"
+        Appointment {
+            patient_name: "Raiyan Hossain".to_string(),
+            doctor_id: "DR001".to_string(),
+            doctor_name: "Dr. Sara Karim".to_string(),
+            appointment_date,
+            appointment_time,
+            appointment_type: "Annual Checkup".to_string(),
+            status: AppointmentStatus::Unconfirmed {
+                datetime: initial_datetime,
             },
-            "decision": {
-                "type": "object",
-                "properties": {
-                    "decision_type": {
-                        "type": "string",
-                        "enum": ["Undecided", "Confirm", "Cancel", "ManualIntervention"],
-                        "description": "The decision type"
-                    },
-                    "new_datetime": {
-                        "type": "string",
-                        "description": "Optional for Confirm: If patient rescheduled to a new time that you verified is available, include it here in format 'YYYY-MM-DD HH:MM'"
-                    },
-                    "approximate_time": {
-                        "type": "string",
-                        "description": "REQUIRED for ManualIntervention: approximate time the patient wants (e.g., 'next week', 'in 2 days') or reason for manual intervention (e.g., 'patient requested to speak with staff')"
-                    }
+            conversation_history: vec![],
+        }
+    }
+
+    pub fn build_decision_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string",
+                    "description": "REQUIRED: A friendly message to send to the patient"
                 },
-                "required": ["decision_type"]
+                "decision": {
+                    "type": "object",
+                    "properties": {
+                        "decision_type": {
+                            "type": "string",
+                            "enum": ["Undecided", "Confirm", "Cancel", "ManualIntervention"],
+                            "description": "The decision type"
+                        },
+                        "new_datetime": {
+                            "type": "string",
+                            "description": "Optional for Confirm: If patient rescheduled to a new time that you verified is available, include it here in format 'YYYY-MM-DD HH:MM'"
+                        },
+                        "approximate_time": {
+                            "type": "string",
+                            "description": "REQUIRED for ManualIntervention: approximate time the patient wants (e.g., 'next week', 'in 2 days') or reason for manual intervention (e.g., 'patient requested to speak with staff')"
+                        }
+                    },
+                    "required": ["decision_type"]
+                }
+            },
+            "required": ["message", "decision"]
+        })
+    }
+
+    pub fn build_initial_prompt(clinic_name: &str, appointment: &Appointment) -> String {
+        let status_description = match &appointment.status {
+            AppointmentStatus::Unconfirmed { datetime } => {
+                format!(
+                    "Unconfirmed (scheduled for {})",
+                    datetime.format("%Y-%m-%d %H:%M")
+                )
             }
-        },
-        "required": ["message", "decision"]
-    })
-}
+            AppointmentStatus::Confirmed { datetime } => {
+                format!(
+                    "Confirmed (scheduled for {})",
+                    datetime.format("%Y-%m-%d %H:%M")
+                )
+            }
+            AppointmentStatus::ManualIntervention {
+                last_known_time,
+                approximate_time,
+            } => {
+                format!(
+                    "Manual intervention required (was: {}, reason: {})",
+                    last_known_time.format("%Y-%m-%d %H:%M"),
+                    approximate_time
+                )
+            }
+            AppointmentStatus::Cancelled => "Cancelled".to_string(),
+        };
 
-fn build_initial_prompt(clinic_name: &str, appointment: &Appointment) -> String {
-    let status_description = match &appointment.status {
-        AppointmentStatus::Unconfirmed { datetime } => {
-            format!(
-                "Unconfirmed (scheduled for {})",
-                datetime.format("%Y-%m-%d %H:%M")
-            )
-        }
-        AppointmentStatus::Confirmed { datetime } => {
-            format!(
-                "Confirmed (scheduled for {})",
-                datetime.format("%Y-%m-%d %H:%M")
-            )
-        }
-        AppointmentStatus::ManualIntervention {
-            last_known_time,
-            approximate_time,
-        } => {
-            format!(
-                "Manual intervention required (was: {}, reason: {})",
-                last_known_time.format("%Y-%m-%d %H:%M"),
-                approximate_time
-            )
-        }
-        AppointmentStatus::Cancelled => "Cancelled".to_string(),
-    };
-
-    format!(
-        r#"You are an AI assistant for {clinic_name} helping to process patient appointment confirmations.
+        format!(
+            r#"You are an AI assistant for {clinic_name} helping to process patient appointment confirmations.
 
 Appointment Details:
 - Patient: {patient_name}
@@ -220,25 +140,177 @@ IMPORTANT:
 - The conversation will continue regardless of your decision
 - Vary your phrasing - don't repeat patterns
 - Do NOT assume intent - use Undecided if unsure"#,
-        clinic_name = clinic_name,
-        patient_name = appointment.patient_name,
-        doctor_id = appointment.doctor_id,
-        doctor_name = appointment.doctor_name,
-        appointment_date = appointment.appointment_date.format("%Y-%m-%d"),
-        appointment_time = appointment.appointment_time.format("%H:%M"),
-        appointment_type = appointment.appointment_type,
-        status = status_description,
-    )
+            clinic_name = clinic_name,
+            patient_name = appointment.patient_name,
+            doctor_id = appointment.doctor_id,
+            doctor_name = appointment.doctor_name,
+            appointment_date = appointment.appointment_date.format("%Y-%m-%d"),
+            appointment_time = appointment.appointment_time.format("%H:%M"),
+            appointment_type = appointment.appointment_type,
+            status = status_description,
+        )
+    }
+
+    pub fn handle_confirm_decision(
+        appointment: &mut Appointment,
+        new_datetime: Option<String>,
+    ) -> NaiveDateTime {
+        let original_datetime =
+            NaiveDateTime::new(appointment.appointment_date, appointment.appointment_time);
+
+        match new_datetime {
+            Some(new_dt_str) => {
+                match NaiveDateTime::parse_from_str(&new_dt_str, "%Y-%m-%d %H:%M") {
+                    Ok(parsed_datetime) => {
+                        appointment.appointment_date = parsed_datetime.date();
+                        appointment.appointment_time = parsed_datetime.time();
+                        println!("[Status updated: Confirmed with new time {}]", new_dt_str);
+                        parsed_datetime
+                    }
+                    Err(_) => {
+                        println!("[Status updated: Confirmed (original time - parsing failed)]");
+                        original_datetime
+                    }
+                }
+            }
+            None => {
+                println!("[Status updated: Confirmed]");
+                original_datetime
+            }
+        }
+    }
+
+    pub fn read_patient_response() -> Result<String, Box<dyn std::error::Error>> {
+        print!("Patient response: ");
+        io::stdout().flush()?;
+
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        Ok(input.trim().to_string())
+    }
 }
 
-async fn generate_appointment_confirmation(
+mod tools {
+    use chrono::NaiveDate;
+    use gemini_rust::{FunctionDeclaration, Tool};
+    use schemars::JsonSchema;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+    pub struct GetAvailableSlotsParams {
+        pub(crate) doctor_id: String,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+    pub struct AvailableSlotsResponse {
+        available_slots: Vec<String>,
+    }
+
+    pub fn build_get_available_slots_tool() -> Tool {
+        let function = FunctionDeclaration::new(
+        "get_available_appointment_slots",
+        "Get all available appointment slots for a specific doctor. Use this when a patient wants to reschedule.",
+        None,
+    )
+    .with_parameters::<GetAvailableSlotsParams>()
+    .with_response::<AvailableSlotsResponse>();
+
+        Tool::new(function)
+    }
+
+    // Simulated function to get available slots
+    pub fn get_available_appointment_slots(_doctor_id: &str) -> AvailableSlotsResponse {
+        // For simulation, return some available slots over the next few days
+        // In a real system, this would query based on doctor_id
+        let base_date = NaiveDate::from_ymd_opt(2025, 11, 16).unwrap();
+
+        let mut slots = vec![];
+        for day_offset in 0..3 {
+            let date = base_date + chrono::Duration::days(day_offset);
+            for hour in [9, 10, 11, 14, 15, 16] {
+                for minute in [0, 30] {
+                    let datetime = date.and_hms_opt(hour, minute, 0).unwrap();
+                    slots.push(datetime.format("%Y-%m-%d %H:%M").to_string());
+                }
+            }
+        }
+
+        AvailableSlotsResponse {
+            available_slots: slots,
+        }
+    }
+}
+
+const SYSTEM_PROMPT: &str = r#"You are a friendly and warm automated agent at a medical clinic helping with appointment scheduling.
+    When writing messages to patients:
+    - Write in a conversational, natural tone like a caring nurse would speak
+    - Use casual, friendly language (e.g., "Hi!", "Thanks!", "Hope you're doing well!")
+    - When introducing yourself for the first time, say "I'm an automated agent from [clinic name]"
+    - Do NOT make up names like "[Your Name]" - you are an automated system
+    - If you need clarification, politely explain why you're reaching out (e.g., "I wasn't quite sure what you meant" or "Just wanted to check with you")
+    - Keep messages brief but warm
+    - Avoid overly formal or robotic language
+    - Use the patient's first name when appropriate
+    - Vary your phrasing - don't use the same patterns repeatedly in a conversation thread"#;
+
+#[derive(Debug, Serialize)]
+pub struct Appointment {
+    patient_name: String,
+    doctor_id: String,
+    doctor_name: String,
+    appointment_date: NaiveDate,
+    appointment_time: NaiveTime,
+    appointment_type: String,
+    status: AppointmentStatus,
+    #[serde(skip)]
+    conversation_history: Vec<Message>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "PascalCase")]
+pub enum AppointmentStatus {
+    Unconfirmed {
+        datetime: NaiveDateTime,
+    },
+    Confirmed {
+        datetime: NaiveDateTime,
+    },
+    ManualIntervention {
+        last_known_time: NaiveDateTime,
+        approximate_time: String,
+    },
+    Cancelled,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "decision_type", rename_all = "PascalCase")]
+pub enum AppointmentDecision {
+    Undecided,
+    Confirm {
+        #[serde(default)]
+        new_datetime: Option<String>,
+    },
+    Cancel,
+    ManualIntervention {
+        #[serde(default)]
+        approximate_time: String,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LLMResponse {
+    message: String,
+    decision: AppointmentDecision,
+}
+
+async fn get_appointment_decision(
     client: &Gemini,
     clinic_name: &str,
     appointment: &Appointment,
 ) -> Result<LLMResponse, Box<dyn std::error::Error>> {
     let schema = build_decision_schema();
     let initial_prompt = build_initial_prompt(clinic_name, appointment);
-    let tool = build_get_available_slots_tool();
+    let tool = tools::build_get_available_slots_tool();
 
     let mut request = client
         .generate_content()
@@ -257,8 +329,7 @@ async fn generate_appointment_confirmation(
     // Handle function calls if present (Phase 2: get conversational response)
     let conversational_text = if !function_calls.is_empty() {
         let function_call_system_prompt = format!(
-            "{}\n\nIMPORTANT: Only provide the conversational message to the patient. Do NOT include any JSON, decision types, or structured data in your response. The decision will be extracted separately.",
-            SYSTEM_PROMPT
+            "{SYSTEM_PROMPT}\n\nIMPORTANT: Only provide the conversational message to the patient. Do NOT include any JSON, decision types, or structured data in your response. The decision will be extracted separately."
         );
 
         let mut conversation = client
@@ -273,9 +344,9 @@ async fn generate_appointment_confirmation(
         for function_call in function_calls {
             match function_call.name.as_str() {
                 "get_available_appointment_slots" => {
-                    let params: GetAvailableSlotsParams =
+                    let params: tools::GetAvailableSlotsParams =
                         serde_json::from_value(function_call.args.clone())?;
-                    let result = get_available_appointment_slots(&params.doctor_id);
+                    let result = tools::get_available_appointment_slots(&params.doctor_id);
 
                     let model_content =
                         Content::function_call(function_call.clone()).with_role(Role::Model);
@@ -300,8 +371,7 @@ async fn generate_appointment_confirmation(
     let mut decision_request = client
         .generate_content()
         .with_system_prompt(&format!(
-            "{}\n\nAlways respond with valid JSON matching the required schema.",
-            SYSTEM_PROMPT
+            "{SYSTEM_PROMPT}\n\nAlways respond with valid JSON matching the required schema."
         ))
         .with_user_message(&initial_prompt);
 
@@ -341,77 +411,24 @@ Use "Cancel" if patient wants to cancel."#,
     Ok(llm_response)
 }
 
-fn get_patient_response() -> Result<String, Box<dyn std::error::Error>> {
-    print!("Patient response: ");
-    io::stdout().flush()?;
-
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    Ok(input.trim().to_string())
-}
-
 pub async fn do_main() -> Result<(), Box<dyn std::error::Error>> {
     let client = prepare_gemini_client()?;
 
-    let appointment_date = NaiveDate::from_ymd_opt(2025, 11, 15).unwrap();
-    let appointment_time = NaiveTime::from_hms_opt(14, 30, 0).unwrap();
-    let initial_datetime = NaiveDateTime::new(appointment_date, appointment_time);
-
-    let mut appointment = Appointment {
-        patient_name: "Raiyan Hossain".to_string(),
-        doctor_id: "DR001".to_string(),
-        doctor_name: "Dr. Sara Karim".to_string(),
-        appointment_date,
-        appointment_time,
-        appointment_type: "Annual Checkup".to_string(),
-        status: AppointmentStatus::Unconfirmed {
-            datetime: initial_datetime,
-        },
-        conversation_history: vec![],
-    };
+    let mut appointment = create_dummy_appointment();
 
     loop {
-        let llm_response =
-            generate_appointment_confirmation(&client, "Labaid Hospital", &appointment).await?;
+        let appointment_decision =
+            get_appointment_decision(&client, "Labaid Hospital", &appointment).await?;
 
-        // Print the LLM's message
-        println!("\n>>> Clinic: {}\n", llm_response.message);
+        println!("\n>>> Clinic: {}\n", appointment_decision.message);
 
-        // Update appointment status based on decision
-        match &llm_response.decision {
+        match &appointment_decision.decision {
             AppointmentDecision::Undecided => {
-                // Status remains unchanged
+                /* Maybe in real flow we should schedule another communication, or force it to Manual Intervention*/
             }
             AppointmentDecision::Confirm { new_datetime } => {
-                // If new_datetime is provided, update the appointment date/time
-                if let Some(new_dt_str) = new_datetime {
-                    if let Ok(new_datetime) =
-                        NaiveDateTime::parse_from_str(new_dt_str, "%Y-%m-%d %H:%M")
-                    {
-                        appointment.appointment_date = new_datetime.date();
-                        appointment.appointment_time = new_datetime.time();
-                        appointment.status = AppointmentStatus::Confirmed {
-                            datetime: new_datetime,
-                        };
-                        println!("[Status updated: Confirmed with new time {}]", new_dt_str);
-                    } else {
-                        // Fall back to current appointment time if parsing fails
-                        let datetime = NaiveDateTime::new(
-                            appointment.appointment_date,
-                            appointment.appointment_time,
-                        );
-                        appointment.status = AppointmentStatus::Confirmed { datetime };
-                        println!("[Status updated: Confirmed (original time)]");
-                    }
-                } else {
-                    // No new time, just confirm existing appointment
-                    let datetime = NaiveDateTime::new(
-                        appointment.appointment_date,
-                        appointment.appointment_time,
-                    );
-                    appointment.status = AppointmentStatus::Confirmed { datetime };
-                    println!("[Status updated: Confirmed]");
-                }
+                let datetime = handle_confirm_decision(&mut appointment, new_datetime.clone());
+                appointment.status = AppointmentStatus::Confirmed { datetime };
             }
             AppointmentDecision::Cancel => {
                 appointment.status = AppointmentStatus::Cancelled;
@@ -431,15 +448,12 @@ pub async fn do_main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        // Add the model's message to conversation history
         appointment
             .conversation_history
-            .push(Message::model(llm_response.message.clone()));
+            .push(Message::model(appointment_decision.message.clone()));
 
-        // Get patient response
-        let response = get_patient_response()?;
+        let response = utils::read_patient_response()?;
 
-        // Check for quit command
         if response.trim().eq_ignore_ascii_case("quit") {
             println!("\nEnding conversation.");
             break;

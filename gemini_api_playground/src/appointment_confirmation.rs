@@ -207,12 +207,13 @@ Decision types:
   * Acknowledge and let them know human staff will follow up
 
 TOOL USAGE:
-- You have access to get_available_appointment_slots(doctor_id)
+- You have access to ONLY ONE tool: get_available_appointment_slots(doctor_id)
 - Use this when patient wants to reschedule or asks about available times
 - The tool returns a list of all available appointment slots
 - Present the options to the patient in a natural, conversational way
-- If patient picks one of the available slots, use Confirm decision with new_datetime
+- If patient picks one of the available slots, use Confirm decision with new_datetime (NO TOOL NEEDED - just include the datetime in your decision)
 - If none work or patient is still uncertain, use Undecided or ManualIntervention as appropriate
+- DO NOT call any other tools or functions - they do not exist
 
 IMPORTANT:
 - Always include a "message" field with a friendly, nurse-like message
@@ -251,19 +252,17 @@ async fn generate_appointment_confirmation(
     }
 
     let response = request.execute().await?;
-
     let function_calls = response.function_calls();
 
-    if !function_calls.is_empty() {
-        let mut conversation = client.generate_content();
-
-        // Reconstruct conversation: system + user + history
-        // Use a modified system prompt that explicitly tells the model not to include JSON
+    // Handle function calls if present (Phase 2: get conversational response)
+    let conversational_text = if !function_calls.is_empty() {
         let function_call_system_prompt = format!(
             "{}\n\nIMPORTANT: Only provide the conversational message to the patient. Do NOT include any JSON, decision types, or structured data in your response. The decision will be extracted separately.",
             SYSTEM_PROMPT
         );
-        conversation = conversation
+
+        let mut conversation = client
+            .generate_content()
             .with_system_prompt(&function_call_system_prompt)
             .with_user_message(&initial_prompt);
 
@@ -271,7 +270,6 @@ async fn generate_appointment_confirmation(
             conversation = conversation.with_message(msg.clone());
         }
 
-        // Add function calls and responses
         for function_call in function_calls {
             match function_call.name.as_str() {
                 "get_available_appointment_slots" => {
@@ -279,7 +277,6 @@ async fn generate_appointment_confirmation(
                         serde_json::from_value(function_call.args.clone())?;
                     let result = get_available_appointment_slots(&params.doctor_id);
 
-                    // Add model message with function call
                     let model_content =
                         Content::function_call(function_call.clone()).with_role(Role::Model);
                     conversation = conversation.with_message(Message {
@@ -287,80 +284,61 @@ async fn generate_appointment_confirmation(
                         role: Role::Model,
                     });
 
-                    // Add function response
                     conversation = conversation
                         .with_function_response("get_available_appointment_slots", result)?;
                 }
-                _ => {
-                    return Err(format!("Unknown function: {}", function_call.name).into());
-                }
+                _ => return Err(format!("Unknown function: {}", function_call.name).into()),
             }
         }
 
-        let text_response = conversation.execute().await?;
-        let response_text = text_response.text();
+        Some(conversation.execute().await?.text())
+    } else {
+        None
+    };
 
-        let decision_prompt = format!(
-            r#"Based on your previous response: "{}"
+    // Phase 3 (or Phase 1 if no tools): Extract structured decision
+    let mut decision_request = client
+        .generate_content()
+        .with_system_prompt(&format!(
+            "{}\n\nAlways respond with valid JSON matching the required schema.",
+            SYSTEM_PROMPT
+        ))
+        .with_user_message(&initial_prompt);
+
+    for msg in &appointment.conversation_history {
+        decision_request = decision_request.with_message(msg.clone());
+    }
+
+    // If we have conversational text from tool use, add it and request decision extraction
+    if let Some(ref text) = conversational_text {
+        decision_request = decision_request
+            .with_message(Message::model(text))
+            .with_user_message(&format!(
+                r#"Based on your previous response: "{}"
 
 Now provide ONLY the decision type as structured JSON.
 Use "Undecided" if you're still gathering information and the automated agent will contact them again.
 Use "Confirm" with "new_datetime" if patient chose a specific available slot.
 Use "ManualIntervention" with "approximate_time" if patient requested human staff or wants to reschedule but gave vague timing.
 Use "Cancel" if patient wants to cancel."#,
-            response_text
-        );
-
-        let mut final_request = client
-            .generate_content()
-            .with_system_prompt("You are analyzing a conversation to extract a structured decision. Always respond with valid JSON matching the required schema.")
-            .with_user_message(&initial_prompt);
-
-        for msg in &appointment.conversation_history {
-            final_request = final_request.with_message(msg.clone());
-        }
-
-        final_request = final_request.with_message(Message::model(&response_text));
-
-        final_request = final_request.with_user_message(&decision_prompt);
-
-        let final_response = final_request
-            .with_response_mime_type("application/json")
-            .with_response_schema(schema)
-            .execute()
-            .await?;
-
-        let json_text = final_response.text();
-
-        // Parse and use the response_text as the message
-        let mut llm_response: LLMResponse = serde_json::from_str(&json_text)?;
-        llm_response.message = response_text; // Use the conversational text from Phase 2
-        Ok(llm_response)
-    } else {
-        // No function calls, go straight to structured output
-        let mut final_request = client
-            .generate_content()
-            .with_system_prompt(&format!(
-                "{}\n\nAlways respond with valid JSON matching the required schema.",
-                SYSTEM_PROMPT
-            ))
-            .with_user_message(&initial_prompt);
-
-        for msg in &appointment.conversation_history {
-            final_request = final_request.with_message(msg.clone());
-        }
-
-        let final_response = final_request
-            .with_response_mime_type("application/json")
-            .with_response_schema(schema)
-            .execute()
-            .await?;
-
-        let json_text = final_response.text();
-
-        let llm_response: LLMResponse = serde_json::from_str(&json_text)?;
-        Ok(llm_response)
+                text
+            ));
     }
+
+    let decision_response = decision_request
+        .with_response_mime_type("application/json")
+        .with_response_schema(schema)
+        .execute()
+        .await?;
+
+    let mut llm_response: LLMResponse = serde_json::from_str(&decision_response.text())?;
+
+    // Use conversational text if available, otherwise use the message from JSON
+    if let Some(text) = conversational_text {
+        llm_response.message = text;
+    }
+
+    Ok(llm_response)
 }
 
 fn get_patient_response() -> Result<String, Box<dyn std::error::Error>> {

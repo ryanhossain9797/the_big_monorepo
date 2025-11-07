@@ -36,12 +36,6 @@ pub enum AppointmentStatus {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct LLMResponse {
-    message: String,
-    decision: AppointmentDecision,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "decision_type", rename_all = "PascalCase")]
 pub enum AppointmentDecision {
     Undecided,
@@ -56,7 +50,13 @@ pub enum AppointmentDecision {
     },
 }
 
-// Tool function parameter types
+#[derive(Debug, Serialize, Deserialize)]
+pub struct LLMResponse {
+    message: String,
+    decision: AppointmentDecision,
+}
+
+// BEGIN Tool call stuff
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 struct GetAvailableSlotsParams {
     doctor_id: String,
@@ -100,6 +100,20 @@ fn get_available_appointment_slots(_doctor_id: &str) -> AvailableSlotsResponse {
         available_slots: slots,
     }
 }
+// END Tool call stuff
+
+const SYSTEM_PROMPT: &str = r#"You are a friendly and warm automated agent at a medical clinic helping with appointment scheduling.
+
+When writing messages to patients:
+- Write in a conversational, natural tone like a caring nurse would speak
+- Use casual, friendly language (e.g., "Hi!", "Thanks!", "Hope you're doing well!")
+- When introducing yourself for the first time, say "I'm an automated agent from [clinic name]"
+- Do NOT make up names like "[Your Name]" - you are an automated system
+- If you need clarification, politely explain why you're reaching out (e.g., "I wasn't quite sure what you meant" or "Just wanted to check with you")
+- Keep messages brief but warm
+- Avoid overly formal or robotic language
+- Use the patient's first name when appropriate
+- Vary your phrasing - don't use the same patterns repeatedly in a conversation thread"#;
 
 fn build_decision_schema() -> serde_json::Value {
     json!({
@@ -225,49 +239,32 @@ async fn generate_appointment_confirmation(
     let initial_prompt = build_initial_prompt(clinic_name, appointment);
     let tool = build_get_available_slots_tool();
 
-    let system_prompt = r#"You are a friendly and warm automated agent at a medical clinic helping with appointment scheduling.
-
-When writing messages to patients:
-- Write in a conversational, natural tone like a caring nurse would speak
-- Use casual, friendly language (e.g., "Hi!", "Thanks!", "Hope you're doing well!")
-- When introducing yourself for the first time, say "I'm an automated agent from [clinic name]"
-- Do NOT make up names like "[Your Name]" - you are an automated system
-- If you need clarification, politely explain why you're reaching out (e.g., "I wasn't quite sure what you meant" or "Just wanted to check with you")
-- Keep messages brief but warm
-- Avoid overly formal or robotic language
-- Use the patient's first name when appropriate
-- Vary your phrasing - don't use the same patterns repeatedly in a conversation thread"#;
-
-    // Phase 1: Initial request with tool to allow function calls
     let mut request = client
         .generate_content()
-        .with_system_prompt(system_prompt)
+        .with_system_prompt(SYSTEM_PROMPT)
         .with_user_message(&initial_prompt)
         .with_tool(tool)
         .with_function_calling_mode(FunctionCallingMode::Auto);
 
-    // Add conversation history
     for msg in &appointment.conversation_history {
         request = request.with_message(msg.clone());
     }
 
     let response = request.execute().await?;
 
-    // Check if there are function calls
     let function_calls = response.function_calls();
 
     if !function_calls.is_empty() {
-        // Phase 2: Handle function calls and get final response
         let mut conversation = client.generate_content();
 
         // Reconstruct conversation: system + user + history
         // Use a modified system prompt that explicitly tells the model not to include JSON
-        let phase2_system_prompt = format!(
+        let function_call_system_prompt = format!(
             "{}\n\nIMPORTANT: Only provide the conversational message to the patient. Do NOT include any JSON, decision types, or structured data in your response. The decision will be extracted separately.",
-            system_prompt
+            SYSTEM_PROMPT
         );
         conversation = conversation
-            .with_system_prompt(&phase2_system_prompt)
+            .with_system_prompt(&function_call_system_prompt)
             .with_user_message(&initial_prompt);
 
         for msg in &appointment.conversation_history {
@@ -283,17 +280,16 @@ When writing messages to patients:
                     let result = get_available_appointment_slots(&params.doctor_id);
 
                     // Add model message with function call
-                    let model_content = Content::function_call(function_call.clone()).with_role(Role::Model);
+                    let model_content =
+                        Content::function_call(function_call.clone()).with_role(Role::Model);
                     conversation = conversation.with_message(Message {
                         content: model_content,
                         role: Role::Model,
                     });
 
                     // Add function response
-                    conversation = conversation.with_function_response(
-                        "get_available_appointment_slots",
-                        result,
-                    )?;
+                    conversation = conversation
+                        .with_function_response("get_available_appointment_slots", result)?;
                 }
                 _ => {
                     return Err(format!("Unknown function: {}", function_call.name).into());
@@ -301,11 +297,9 @@ When writing messages to patients:
             }
         }
 
-        // Execute to get the model's response after tool use
         let text_response = conversation.execute().await?;
         let response_text = text_response.text();
 
-        // Phase 3: Get structured decision (using the text we already have as the message)
         let decision_prompt = format!(
             r#"Based on your previous response: "{}"
 
@@ -322,15 +316,12 @@ Use "Cancel" if patient wants to cancel."#,
             .with_system_prompt("You are analyzing a conversation to extract a structured decision. Always respond with valid JSON matching the required schema.")
             .with_user_message(&initial_prompt);
 
-        // Add conversation history
         for msg in &appointment.conversation_history {
             final_request = final_request.with_message(msg.clone());
         }
 
-        // Add the model's text response
         final_request = final_request.with_message(Message::model(&response_text));
 
-        // Add instruction to extract decision
         final_request = final_request.with_user_message(&decision_prompt);
 
         let final_response = final_request
@@ -349,7 +340,10 @@ Use "Cancel" if patient wants to cancel."#,
         // No function calls, go straight to structured output
         let mut final_request = client
             .generate_content()
-            .with_system_prompt(&format!("{}\n\nAlways respond with valid JSON matching the required schema.", system_prompt))
+            .with_system_prompt(&format!(
+                "{}\n\nAlways respond with valid JSON matching the required schema.",
+                SYSTEM_PROMPT
+            ))
             .with_user_message(&initial_prompt);
 
         for msg in &appointment.conversation_history {

@@ -326,7 +326,6 @@ async fn get_appointment_decision(
     let response = request.execute().await?;
     let function_calls = response.function_calls();
 
-    // Handle function calls if present (Phase 2: get conversational response)
     let conversational_text = if !function_calls.is_empty() {
         let function_call_system_prompt = format!(
             "{SYSTEM_PROMPT}\n\nIMPORTANT: Only provide the conversational message to the patient. Do NOT include any JSON, decision types, or structured data in your response. The decision will be extracted separately."
@@ -367,7 +366,6 @@ async fn get_appointment_decision(
         None
     };
 
-    // Phase 3 (or Phase 1 if no tools): Extract structured decision
     let mut decision_request = client
         .generate_content()
         .with_system_prompt(&format!(
